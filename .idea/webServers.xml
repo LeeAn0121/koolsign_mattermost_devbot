@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="a3f0f735-116f-4219-b043-101d438af6b8" name="MATTERMOST_172.16.140.27">
+        <fileTransfer rootFolder="/home/devops" accessType="SFTP" host="172.16.140.27" port="22" sshConfigId="83c15228-1a5c-4f90-bf1e-7016c25fb987" sshConfig="devops@172.16.140.27:22 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" keepAliveTimeout="10000" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>

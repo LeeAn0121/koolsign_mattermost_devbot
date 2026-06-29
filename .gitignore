@@ -1,0 +1,6 @@
+/mm-bot/.env
+/app/mattermost/*
+/nginx
+*.yaml
+*.backup
+*.bak
