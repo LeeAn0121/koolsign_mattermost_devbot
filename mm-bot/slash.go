@@ -334,15 +334,15 @@ func handleAnnounceSlash(w http.ResponseWriter, text, userName, currentChannelID
 		return
 	}
 
-	// 즉시 공지
+	// 즉시 공지 — 먼저 응답 후 전송 (타임아웃 방지)
 	announceMsg := buildAnnounceMsg(content, userName)
 	if mmClient != nil {
-		sendBotMessage(targetChannelID, announceMsg)
 		chDesc := "현재 채널"
 		if channelName != "" {
 			chDesc = fmt.Sprintf("`~%s`", channelName)
 		}
 		slashEphemeral(w, fmt.Sprintf("✅ %s에 공지 메시지가 게시되었습니다.", chDesc))
+		go sendBotMessage(targetChannelID, announceMsg)
 		return
 	}
 	slashResponse(w, announceMsg)

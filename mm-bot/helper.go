@@ -164,6 +164,9 @@ func resolveChannelID(teamID, channelName string) (string, error) {
 	}
 
 	// teamID 없으면 Bot 자신의 팀 전체 순회
+	if botUser == nil {
+		return "", fmt.Errorf("Bot이 아직 초기화되지 않았습니다. 잠시 후 다시 시도하세요.")
+	}
 	teams, _, err := mmClient.GetTeamsForUser(botUser.Id, "")
 	if err != nil || len(teams) == 0 {
 		return "", fmt.Errorf("Bot이 속한 팀을 찾을 수 없습니다")
