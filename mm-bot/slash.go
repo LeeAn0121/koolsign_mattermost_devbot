@@ -21,6 +21,8 @@ func verifySlashToken(command, token string) bool {
 		"/weather":      "SLASH_TOKEN_WEATHER",
 		"/announce":     "SLASH_TOKEN_ANNOUNCE",
 		"/commands":     "SLASH_TOKEN_HELP",
+		"/history":      "SLASH_TOKEN_HISTORY",
+		"/dashboard":    "SLASH_TOKEN_DASHBOARD",
 	}
 	key, ok := envKey[command]
 	if !ok {
@@ -64,6 +66,10 @@ func handleSlash(w http.ResponseWriter, r *http.Request) {
 		handleWeatherSlash(w, text)
 	case "/announce":
 		handleAnnounceSlash(w, text, userName, channelID, teamID)
+	case "/history":
+		handleHistorySlash(w, text)
+	case "/dashboard":
+		handleDashboardSlash(w)
 	default:
 		slashEphemeral(w, "❓ 알 수 없는 명령어")
 	}
@@ -301,7 +307,28 @@ func handleAnnounceSlash(w http.ResponseWriter, text, userName, currentChannelID
 			"- `/announce 메시지` — 즉시, 현재 채널\n"+
 			"- `/announce ~채널명 메시지` — 즉시, 특정 채널\n"+
 			"- `/announce HH:MM 메시지` — 예약, 현재 채널\n"+
-			"- `/announce ~채널명 HH:MM 메시지` — 예약, 특정 채널")
+			"- `/announce ~채널명 HH:MM 메시지` — 예약, 특정 채널\n"+
+			"- `/announce list` — 예약된 공지 목록")
+		return
+	}
+
+	if text == "list" {
+		list := listSchedules()
+		var found []ScheduledMsg
+		for _, s := range list {
+			if s.IsAnnounce {
+				found = append(found, s)
+			}
+		}
+		if len(found) == 0 {
+			slashEphemeral(w, "예약된 공지가 없습니다.")
+			return
+		}
+		msg := "### 예약된 공지 목록\n| ID | 전송시간 | 예약자 | 내용 |\n|---|---|---|---|\n"
+		for _, s := range found {
+			msg += fmt.Sprintf("| %d | %s | @%s | %s |\n", s.ID, s.At.Format("01/02 15:04"), s.CreatedBy, truncate(s.Message, 40))
+		}
+		slashEphemeral(w, msg)
 		return
 	}
 
@@ -348,6 +375,26 @@ func handleAnnounceSlash(w http.ResponseWriter, text, userName, currentChannelID
 	slashResponse(w, announceMsg)
 }
 
+// ── 배포 히스토리 슬래시 커맨드 ──────────────────────────────────────
+// 사용법: /history [건수]
+func handleHistorySlash(w http.ResponseWriter, args string) {
+	n := 10
+	args = strings.TrimSpace(args)
+	if args != "" {
+		var v int
+		if _, err := fmt.Sscanf(args, "%d", &v); err == nil && v > 0 {
+			n = v
+		}
+	}
+	slashEphemeral(w, formatDeployHistory(n))
+}
+
+// ── 통합 대시보드 슬래시 커맨드 ──────────────────────────────────────
+// 사용법: /dashboard
+func handleDashboardSlash(w http.ResponseWriter) {
+	slashResponse(w, getDashboard())
+}
+
 // ── 도움말 슬래시 커맨드 ──────────────────────────────────────────────
 // 사용법: /help
 func handleHelp(w http.ResponseWriter) {
@@ -367,10 +414,15 @@ func handleHelp(w http.ResponseWriter) {
 		"| `/announce 메시지` | 현재 채널에 즉시 공지 | `/announce 공지 내용` |\n" +
 		"| `/announce ~채널 메시지` | 특정 채널에 즉시 공지 | `/announce ~공지 내용` |\n" +
 		"| `/announce HH:MM 메시지` | 현재 채널에 예약 공지 | `/announce 14:00 공지 내용` |\n" +
-		"| `/announce ~채널 HH:MM 메시지` | 특정 채널에 예약 공지 | `/announce ~공지 14:00 내용` |\n\n---\n\n" +
+		"| `/announce ~채널 HH:MM 메시지` | 특정 채널에 예약 공지 | `/announce ~공지 14:00 내용` |\n" +
+		"| `/announce list` | 예약된 공지 목록 조회 | `/announce list` |\n\n---\n\n" +
 		"#### 🌤 날씨\n" +
 		"| 명령어 | 설명 | 예시 |\n|---|---|---|\n" +
 		"| `/weather [도시]` | 기상청 현재 날씨 (기본: 서울) | `/weather 부산` |\n\n---\n\n" +
+		"#### 📊 히스토리 / 대시보드\n" +
+		"| 명령어 | 설명 | 예시 |\n|---|---|---|\n" +
+		"| `/history [n]` | 최근 배포 히스토리 (기본 10건) | `/history 20` |\n" +
+		"| `/dashboard` | GitLab + Gitea 통합 MR/PR 현황 | `/dashboard` |\n\n---\n\n" +
 		"> 💡 **팁:** 메시지 입력창에 `/` 만 입력하면 전체 명령어 자동완성 목록이 표시됩니다."
 
 	slashEphemeral(w, msg)

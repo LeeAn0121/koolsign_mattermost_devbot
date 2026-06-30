@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -62,15 +64,28 @@ type kmaResp struct {
 	} `json:"response"`
 }
 
+// WeatherData 는 날씨 조회 결과를 담는 구조체입니다.
+type WeatherData struct {
+	City      string `json:"city"`
+	Weather   string `json:"weather"`
+	Temp      string `json:"temp"`
+	Humidity  string `json:"humidity"`
+	WindSpeed string `json:"windSpeed"`
+	WindDir   string `json:"windDir"`
+	Rain      string `json:"rain"`
+	BaseDate  string `json:"baseDate"`
+	BaseTime  string `json:"baseTime"`
+}
+
 // 강수형태 코드
 var ptyDesc = map[string]string{
 	"0": "맑음 / 흐림",
-	"1": "🌧 비",
-	"2": "🌨 비/눈",
-	"3": "❄️ 눈",
-	"5": "🌦 빗방울",
-	"6": "🌨 빗방울/눈날림",
-	"7": "❄️ 눈날림",
+	"1": "비",
+	"2": "비/눈",
+	"3": "눈",
+	"5": "빗방울",
+	"6": "빗방울/눈날림",
+	"7": "눈날림",
 }
 
 // 풍향 각도 → 방향 문자열
@@ -84,90 +99,185 @@ func windDir(vecStr string) string {
 	return dirs[int((deg+11.25)/22.5)%16]
 }
 
-// getWeather 는 기상청 API Hub 초단기실황 API를 통해 현재 날씨를 조회합니다.
-// 환경변수: KMA_API_KEY (기상청 API Hub 인증키)
-// 도시명이 비어 있으면 WEATHER_DEFAULT_CITY(기본값: 서울)를 사용합니다.
-func getWeather(city string) (string, error) {
+// latLonToGrid 는 위경도를 기상청 격자 좌표로 변환합니다 (Lambert Conformal Conic).
+func latLonToGrid(lat, lon float64) (int, int) {
+	const (
+		RE    = 6371.00877
+		GRID  = 5.0
+		SLAT1 = 30.0
+		SLAT2 = 60.0
+		OLON  = 126.0
+		OLAT  = 38.0
+		XO    = 43.0
+		YO    = 136.0
+	)
+	deg := math.Pi / 180.0
+
+	slat1 := SLAT1 * deg
+	slat2 := SLAT2 * deg
+	olon := OLON * deg
+	olat := OLAT * deg
+	re := RE / GRID
+
+	sn := math.Log(math.Cos(slat1)/math.Cos(slat2)) /
+		math.Log(math.Tan(math.Pi*0.25+slat2*0.5)/math.Tan(math.Pi*0.25+slat1*0.5))
+	sf := math.Pow(math.Tan(math.Pi*0.25+slat1*0.5), sn) * math.Cos(slat1) / sn
+	ro := re * sf / math.Pow(math.Tan(math.Pi*0.25+olat*0.5), sn)
+
+	ra := re * sf / math.Pow(math.Tan(math.Pi*0.25+lat*deg*0.5), sn)
+	theta := lon*deg - olon
+	for theta > math.Pi {
+		theta -= 2 * math.Pi
+	}
+	for theta < -math.Pi {
+		theta += 2 * math.Pi
+	}
+	theta *= sn
+
+	nx := int(ra*math.Sin(theta) + XO + 0.5)
+	ny := int(ro - ra*math.Cos(theta) + YO + 0.5)
+	return nx, ny
+}
+
+// geocodeAddress 는 Nominatim(OpenStreetMap)으로 주소를 위경도로 변환합니다.
+func geocodeAddress(address string) (float64, float64, error) {
+	apiURL := "https://nominatim.openstreetmap.org/search?q=" +
+		url.QueryEscape(address) + "&format=json&limit=1&countrycodes=kr"
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	req.Header.Set("User-Agent", "mm-bot/1.0 (+internal-tool)")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer resp.Body.Close()
+
+	var results []struct {
+		Lat string `json:"lat"`
+		Lon string `json:"lon"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
+		return 0, 0, err
+	}
+	if len(results) == 0 {
+		return 0, 0, fmt.Errorf("주소를 찾을 수 없습니다: %s", address)
+	}
+
+	latF, _ := strconv.ParseFloat(results[0].Lat, 64)
+	lonF, _ := strconv.ParseFloat(results[0].Lon, 64)
+	return latF, lonF, nil
+}
+
+func supportedCities() string {
+	names := make([]string, 0, len(cityGrid))
+	for k := range cityGrid {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
+// fetchWeatherData 는 기상청 초단기실황 API를 호출해 WeatherData를 반환합니다.
+// city 가 도시 목록에 없으면 Nominatim 으로 지오코딩합니다.
+func fetchWeatherData(city string) (*WeatherData, error) {
 	apiKey := os.Getenv("KMA_API_KEY")
 	if apiKey == "" {
-		return "", fmt.Errorf("KMA_API_KEY 환경변수가 설정되지 않았습니다\n발급: https://apihub.kma.go.kr")
-	}
-	if city == "" {
-		city = getEnv("WEATHER_DEFAULT_CITY", "서울")
+		return nil, fmt.Errorf("KMA_API_KEY 환경변수가 설정되지 않았습니다")
 	}
 
-	grid, ok := cityGrid[city]
-	if !ok {
-		// 지원 도시 목록 정렬해서 표시
-		names := make([]string, 0, len(cityGrid))
-		for k := range cityGrid {
-			names = append(names, k)
+	var nx, ny int
+	if grid, ok := cityGrid[city]; ok {
+		nx, ny = grid[0], grid[1]
+	} else {
+		lat, lon, err := geocodeAddress(city)
+		if err != nil {
+			return nil, fmt.Errorf("%v\n\n**지원 도시:** %s", err, supportedCities())
 		}
-		sort.Strings(names)
-		return "", fmt.Errorf("지원하지 않는 도시: `%s`\n**지원 도시:** %s", city, strings.Join(names, ", "))
+		nx, ny = latLonToGrid(lat, lon)
 	}
 
-	// base_date, base_time 계산
-	// 초단기실황은 매 시각 40분 이후에 해당 시각 데이터가 발표됨
-	// 안전하게 현재 시각에서 1시간을 뺀 시각 사용
 	now := time.Now()
-	baseTime := now.Add(-1 * time.Hour)
-	baseDateStr := baseTime.Format("20060102")
-	baseTimeStr := fmt.Sprintf("%02d00", baseTime.Hour())
+	// KMA 초단기실황은 매시 :40에 해당 시각 데이터 제공. 40분 이후면 현재 시각 사용.
+	base := now
+	if now.Minute() < 40 {
+		base = now.Add(-1 * time.Hour)
+	}
+	baseDateStr := base.Format("20060102")
+	baseTimeStr := fmt.Sprintf("%02d00", base.Hour())
 
 	apiURL := fmt.Sprintf(
 		"https://apihub.kma.go.kr/api/typ02/openApi/VilageFcstInfoService_2.0/getUltraSrtNcst"+
 			"?pageNo=1&numOfRows=10&dataType=JSON"+
 			"&base_date=%s&base_time=%s&nx=%d&ny=%d&authKey=%s",
-		baseDateStr, baseTimeStr, grid[0], grid[1], apiKey,
+		baseDateStr, baseTimeStr, nx, ny, apiKey,
 	)
 
 	resp, err := http.Get(apiURL)
 	if err != nil {
-		return "", fmt.Errorf("기상청 API 요청 실패: %v", err)
+		return nil, fmt.Errorf("기상청 API 요청 실패: %v", err)
 	}
 	defer resp.Body.Close()
 
 	var r kmaResp
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
-		return "", fmt.Errorf("응답 파싱 실패: %v", err)
+		return nil, fmt.Errorf("응답 파싱 실패: %v", err)
 	}
-
 	if r.Response.Header.ResultCode != "00" {
-		return "", fmt.Errorf("기상청 API 오류 [%s]: %s",
+		return nil, fmt.Errorf("기상청 API 오류 [%s]: %s",
 			r.Response.Header.ResultCode, r.Response.Header.ResultMsg)
 	}
 
-	// 카테고리별 값 추출
 	data := map[string]string{}
 	for _, item := range r.Response.Body.Items.Item {
 		data[item.Category] = item.ObsrValue
 	}
-
-	temp := data["T1H"]     // 기온
-	humidity := data["REH"] // 습도
-	wsd := data["WSD"]      // 풍속
-	vec := data["VEC"]      // 풍향
-	rn1 := data["RN1"]      // 1시간 강수량
 
 	pty := ptyDesc[data["PTY"]]
 	if pty == "" {
 		pty = "맑음 / 흐림"
 	}
 
-	windDirStr := windDir(vec)
-	windInfo := wsd + " m/s"
-	if windDirStr != "" {
-		windInfo = fmt.Sprintf("%s m/s (%s)", wsd, windDirStr)
+	wdStr := windDir(data["VEC"])
+	windSpeed := data["WSD"] + " m/s"
+	if wdStr != "" {
+		windSpeed = fmt.Sprintf("%s m/s (%s)", data["WSD"], wdStr)
 	}
 
-	rainInfo := rn1 + " mm"
-	if rn1 == "0" || rn1 == "" {
-		rainInfo = "-"
+	rain := data["RN1"] + " mm"
+	if data["RN1"] == "0" || data["RN1"] == "" {
+		rain = "-"
+	}
+
+	return &WeatherData{
+		City:      city,
+		Weather:   pty,
+		Temp:      data["T1H"],
+		Humidity:  data["REH"],
+		WindSpeed: windSpeed,
+		WindDir:   wdStr,
+		Rain:      rain,
+		BaseDate:  baseDateStr,
+		BaseTime:  baseTimeStr,
+	}, nil
+}
+
+// getWeather 는 Mattermost 메시지용 날씨 문자열을 반환합니다.
+func getWeather(city string) (string, error) {
+	if city == "" {
+		city = getEnv("WEATHER_DEFAULT_CITY", "서울")
+	}
+
+	d, err := fetchWeatherData(city)
+	if err != nil {
+		return "", err
 	}
 
 	return fmt.Sprintf(
-		"### 🌡 %s 현재 날씨 (기상청)\n"+
+		"### %s 현재 날씨 (기상청)\n"+
 			"| 항목 | 값 |\n|---|---|\n"+
 			"| 날씨 | %s |\n"+
 			"| 기온 | **%s°C** |\n"+
@@ -175,12 +285,6 @@ func getWeather(city string) (string, error) {
 			"| 풍속 | %s |\n"+
 			"| 1시간 강수량 | %s |\n"+
 			"\n*기준 시각: %s %s*",
-		city,
-		pty,
-		temp,
-		humidity,
-		windInfo,
-		rainInfo,
-		baseDateStr, baseTimeStr,
+		d.City, d.Weather, d.Temp, d.Humidity, d.WindSpeed, d.Rain, d.BaseDate, d.BaseTime,
 	), nil
 }

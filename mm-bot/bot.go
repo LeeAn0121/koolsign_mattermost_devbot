@@ -216,6 +216,23 @@ func handleBotCommand(channelID, userID, cmd string) {
 			reply += fmt.Sprintf("| %d | %s | %s | %s |\n", s.ID, kind, s.At.Format("01/02 15:04"), truncate(s.Message, 50))
 		}
 
+	case cmdLower == "공지목록" || cmdLower == "공지 목록":
+		list := listSchedules()
+		var found []ScheduledMsg
+		for _, s := range list {
+			if s.IsAnnounce {
+				found = append(found, s)
+			}
+		}
+		if len(found) == 0 {
+			reply = "예약된 공지가 없습니다."
+			break
+		}
+		reply = "### 예약된 공지 목록\n| ID | 전송시간 | 예약자 | 내용 |\n|---|---|---|---|\n"
+		for _, s := range found {
+			reply += fmt.Sprintf("| %d | %s | @%s | %s |\n", s.ID, s.At.Format("01/02 15:04"), s.CreatedBy, truncate(s.Message, 40))
+		}
+
 	case strings.HasPrefix(cmdLower, "예약취소 ") || strings.HasPrefix(cmdLower, "예약 취소 "):
 		args := strings.Fields(cmd)
 		if len(args) < 2 {
@@ -302,6 +319,74 @@ func handleBotCommand(channelID, userID, cmd string) {
 		}
 		return
 
+	case strings.HasPrefix(cmdLower, "재시작 ") || strings.HasPrefix(cmdLower, "restart "):
+		args := strings.Fields(cmd)
+		if len(args) < 2 {
+			reply = "사용법: `@devbot 재시작 [컨테이너명]`"
+			break
+		}
+		sendRestartConfirm(channelID, args[1], userName)
+		return
+
+	case cmdLower == "업타임" || cmdLower == "uptime":
+		out, _ := runCmd("docker", "ps", "--format", "| {{.Names}} | {{.Status}} | {{.RunningFor}} |")
+		if strings.TrimSpace(out) == "" {
+			reply = "실행 중인 컨테이너가 없습니다."
+		} else {
+			reply = "### 컨테이너 업타임\n| 이름 | 상태 | 실행 시간 |\n|---|---|---|\n" + out
+		}
+
+	case cmdLower == "이미지목록" || cmdLower == "이미지 목록" || cmdLower == "images":
+		out, _ := runCmd("docker", "images", "--format", "| {{.Repository}} | {{.Tag}} | {{.Size}} | {{.CreatedSince}} |")
+		if strings.TrimSpace(out) == "" {
+			reply = "이미지가 없습니다."
+		} else {
+			reply = "### Docker 이미지 목록\n| 저장소 | 태그 | 크기 | 생성일 |\n|---|---|---|---|\n" + out
+		}
+
+	case strings.HasPrefix(cmdLower, "grep "):
+		args := strings.Fields(cmd)
+		if len(args) < 3 {
+			reply = "사용법: `@devbot grep [컨테이너] [패턴]`\n예: `@devbot grep mattermost ERROR`"
+			break
+		}
+		container := args[1]
+		pattern := strings.ToLower(strings.Join(args[2:], " "))
+		logsOut, err := runCmd("docker", "logs", "--tail", "1000", container)
+		if err != nil {
+			reply = fmt.Sprintf("컨테이너를 찾을 수 없습니다: `%s`", container)
+			break
+		}
+		var matched []string
+		for _, line := range strings.Split(logsOut, "\n") {
+			if strings.Contains(strings.ToLower(line), pattern) {
+				matched = append(matched, line)
+			}
+		}
+		if len(matched) == 0 {
+			reply = fmt.Sprintf("`%s` 로그에서 `%s` 패턴을 찾을 수 없습니다.", container, strings.Join(args[2:], " "))
+			break
+		}
+		if len(matched) > 50 {
+			matched = matched[len(matched)-50:]
+		}
+		reply = fmt.Sprintf("### `%s` 로그 검색: `%s` (%d건)\n```\n%s\n```",
+			container, strings.Join(args[2:], " "), len(matched), truncate(strings.Join(matched, "\n"), 3000))
+
+	case cmdLower == "히스토리" || cmdLower == "history" ||
+		strings.HasPrefix(cmdLower, "히스토리 ") || strings.HasPrefix(cmdLower, "history "):
+		n := 10
+		parts := strings.Fields(cmd)
+		if len(parts) >= 2 {
+			if v, err := strconv.Atoi(parts[1]); err == nil && v > 0 {
+				n = v
+			}
+		}
+		reply = formatDeployHistory(n)
+
+	case cmdLower == "대시보드" || cmdLower == "dashboard":
+		reply = getDashboard()
+
 	default:
 		reply = fmt.Sprintf("@%s 이해할 수 없는 명령어입니다.\n`@devbot 도움말` 로 명령어 목록을 확인하세요.", userName)
 	}
@@ -363,6 +448,67 @@ func sendDeployConfirm(channelID, target, userName string) {
 	mmClient.CreatePost(post)
 }
 
+func sendRestartConfirm(channelID, container, userName string) {
+	if mmClient == nil {
+		return
+	}
+	botActionURL := os.Getenv("BOT_ACTION_URL")
+	post := &model.Post{
+		ChannelId: channelID,
+		Message:   fmt.Sprintf("@%s님이 `%s` 컨테이너 재시작을 요청했습니다.", userName, container),
+		Props: model.StringInterface{
+			"attachments": []map[string]interface{}{
+				{
+					"actions": []map[string]interface{}{
+						{
+							"name":  "재시작",
+							"type":  "button",
+							"style": "danger",
+							"integration": map[string]interface{}{
+								"url": botActionURL + "/bot-action",
+								"context": map[string]interface{}{
+									"action":      "restart",
+									"container":   container,
+									"requestedBy": userName,
+								},
+							},
+						},
+						{
+							"name":  "취소",
+							"type":  "button",
+							"style": "default",
+							"integration": map[string]interface{}{
+								"url": botActionURL + "/bot-action",
+								"context": map[string]interface{}{
+									"action": "cancel",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	mmClient.CreatePost(post)
+}
+
+func sendDMToUser(username, msg string) {
+	if mmClient == nil || botUser == nil || username == "" {
+		return
+	}
+	user, _, err := mmClient.GetUserByUsername(strings.ToLower(username), "")
+	if err != nil || user == nil {
+		log.Printf("[Bot] DM 대상 사용자 없음: %s", username)
+		return
+	}
+	ch, _, err := mmClient.CreateDirectChannel(botUser.Id, user.Id)
+	if err != nil || ch == nil {
+		log.Printf("[Bot] DM 채널 생성 실패: %v", err)
+		return
+	}
+	sendBotMessage(ch.Id, msg)
+}
+
 func handleBotAction(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	var payload struct {
@@ -411,21 +557,48 @@ func handleBotAction(w http.ResponseWriter, r *http.Request) {
 			}
 			out, err := runScript(scripts[target])
 			if err != nil {
+				addDeployHistory(target, requestedBy, userName, "failed", string(out))
 				errMsg := fmt.Sprintf("### ❌ 배포 실패 — `%s`\n요청: @%s | 승인: @%s\n```\n%s\n```",
 					target, requestedBy, userName, truncate(string(out), 2000))
-
 				sendMM(mmDeploy, errMsg)
-
-				// 프로덕션 배포 실패 시 alert 채널로 추가 알림
 				if target == "prod" {
 					sendMM(mmAlert, "## 🚨 [CRITICAL] 프로덕션 배포 실패!\n즉시 확인이 필요합니다.\n"+errMsg)
 				}
 				return
 			}
+			addDeployHistory(target, requestedBy, userName, "success", string(out))
 			sendMM(mmDeploy, fmt.Sprintf(
 				"### ✅ 배포 완료 — `%s`\n요청: @%s | 승인: @%s\n```\n%s\n```",
 				target, requestedBy, userName, truncate(string(out), 2000),
 			))
+		}()
+		return
+	}
+
+	if action == "restart" {
+		container := fmt.Sprintf("%v", payload.Context["container"])
+		requestedBy := fmt.Sprintf("%v", payload.Context["requestedBy"])
+
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"update": map[string]string{
+				"message": fmt.Sprintf("`%s` 재시작 중... (승인: @%s)", container, userName),
+			},
+		})
+
+		go func() {
+			mmAlert := os.Getenv("MM_WEBHOOK_ALERT")
+			out, err := runCmd("docker", "restart", container)
+			if err != nil {
+				sendMM(mmAlert, fmt.Sprintf(
+					"### 컨테이너 재시작 실패\n**컨테이너:** `%s`\n요청: @%s | 승인: @%s\n```\n%s\n```",
+					container, requestedBy, userName, truncate(out, 500),
+				))
+			} else {
+				sendMM(mmAlert, fmt.Sprintf(
+					"### 컨테이너 재시작 완료\n**컨테이너:** `%s`\n요청: @%s | 승인: @%s",
+					container, requestedBy, userName,
+				))
+			}
 		}()
 		return
 	}
@@ -445,9 +618,15 @@ func buildHelpMsg() string {
 	help += "**서버 관리**\n```\n"
 	help += "@devbot 상태                     - 서버/컨테이너/디스크/메모리 상태\n"
 	help += "@devbot 컨테이너                 - 실행 중인 컨테이너 목록\n"
+	help += "@devbot 업타임                   - 컨테이너별 실행 시간\n"
+	help += "@devbot 이미지목록               - Docker 이미지 목록\n"
 	help += "@devbot 로그 [컨테이너] [줄수]    - 컨테이너 로그 조회\n"
+	help += "@devbot grep [컨테이너] [패턴]   - 컨테이너 로그 검색\n"
+	help += "@devbot 재시작 [컨테이너]        - 컨테이너 재시작 (확인 버튼)\n"
 	help += "@devbot 배포 staging             - 스테이징 배포 (확인 버튼 포함)\n"
 	help += "@devbot 배포 prod                - 프로덕션 배포 (확인 버튼 포함)\n"
+	help += "@devbot 히스토리 [건수]           - 배포 히스토리 (기본 10건)\n"
+	help += "@devbot 대시보드                 - GitLab+Gitea 통합 현황\n"
 	help += "```\n"
 	help += "**예약 메시지**\n```\n"
 	help += "@devbot 예약 HH:MM 메시지        - 지정 시간에 이 채널로 메시지 전송\n"
@@ -457,6 +636,7 @@ func buildHelpMsg() string {
 	help += "**날씨 / 공지**\n```\n"
 	help += "@devbot 날씨 [도시명]            - 날씨 조회 (기본: 서울)\n"
 	help += "@devbot 공지 메시지 내용         - 공지 형식으로 메시지 게시\n"
+	help += "@devbot 공지목록                 - 예약된 공지 목록\n"
 	help += "```\n"
 	return help
 }

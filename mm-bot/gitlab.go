@@ -48,6 +48,10 @@ type GitlabMREvent struct {
 	Assignees []struct {
 		Name string `json:"name"`
 	} `json:"assignees"`
+	Reviewers []struct {
+		Name     string `json:"name"`
+		Username string `json:"username"`
+	} `json:"reviewers"`
 }
 
 type GitlabIssueEvent struct {
@@ -76,7 +80,8 @@ type GitlabPipelineEvent struct {
 		WebURL string `json:"web_url"`
 	} `json:"project"`
 	User struct {
-		Name string `json:"name"`
+		Name     string `json:"name"`
+		Username string `json:"username"`
 	} `json:"user"`
 	Commit struct {
 		Message string `json:"message"`
@@ -164,11 +169,11 @@ func handleGitlab(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[Gitlab] Push Hook 처리 중: %s (%d commits)", e.Project.Name, e.TotalCommitsCount)
 		branchBadge := fmt.Sprintf("`%s`", branch)
 		if branch == "main" || branch == "master" {
-			branchBadge = fmt.Sprintf("⚠️ `%s`", branch)
+			branchBadge = fmt.Sprintf("`%s` [main/master]", branch)
 		}
 
 		msg := fmt.Sprintf(
-			"### 📦 GitLab Push\n**프로젝트:** %s | **브랜치:** %s | **작성자:** %s | **커밋:** %d개\n",
+			"### GitLab Push\n**프로젝트:** %s | **브랜치:** %s | **작성자:** %s | **커밋:** %d개\n",
 			shortRepo(e.Project.Name, e.Project.WebURL),
 			branchBadge, e.UserName, e.TotalCommitsCount,
 		)
@@ -196,10 +201,10 @@ func handleGitlab(w http.ResponseWriter, r *http.Request) {
 		}
 
 		labels := map[string]string{
-			"open":   "🔀 MR 오픈",
-			"close":  "🔒 MR 닫힘",
-			"merge":  "✅ MR 병합",
-			"reopen": "🔄 MR 재오픈",
+			"open":   "MR 오픈",
+			"close":  "MR 닫힘",
+			"merge":  "MR 병합",
+			"reopen": "MR 재오픈",
 		}
 		label, ok := labels[e.ObjectAttributes.Action]
 		if !ok {
@@ -218,15 +223,52 @@ func handleGitlab(w http.ResponseWriter, r *http.Request) {
 			assignee = strings.Join(names, ", ")
 		}
 
+		reviewer := "없음"
+		if len(e.Reviewers) > 0 {
+			var mentions []string
+			for _, r := range e.Reviewers {
+				if r.Username != "" {
+					mentions = append(mentions, "@"+r.Username)
+				} else {
+					mentions = append(mentions, r.Name)
+				}
+			}
+			reviewer = strings.Join(mentions, ", ")
+		}
+
 		msg := fmt.Sprintf(
-			"### %s — GitLab\n**프로젝트:** %s\n**제목:** [%s](%s)\n**브랜치:** `%s` → `%s`\n**작성자:** %s | **담당자:** %s",
+			"### %s — GitLab\n**프로젝트:** %s\n**제목:** [%s](%s)\n**브랜치:** `%s` → `%s`\n**작성자:** %s | **담당자:** %s | **리뷰어:** %s",
 			label,
 			shortRepo(e.Project.Name, e.Project.WebURL),
 			e.ObjectAttributes.Title, e.ObjectAttributes.URL,
 			e.ObjectAttributes.SourceBranch, e.ObjectAttributes.TargetBranch,
-			e.User.Name, assignee,
+			e.User.Name, assignee, reviewer,
 		)
 		sendMM(mmCode, msg)
+
+		// MR 병합 시 자동 배포
+		if e.ObjectAttributes.Action == "merge" {
+			autoTarget := getEnv("AUTO_DEPLOY_MERGE_TO", "")
+			autoScript := getEnv("AUTO_DEPLOY_SCRIPT", "")
+			if autoTarget != "" && autoScript != "" &&
+				strings.EqualFold(e.ObjectAttributes.TargetBranch, autoTarget) {
+				go func() {
+					mmDeploy := os.Getenv("MM_WEBHOOK_DEPLOY")
+					out, err := runScript(autoScript)
+					if err != nil {
+						sendMM(mmDeploy, fmt.Sprintf(
+							"### 자동 배포 실패\n**MR:** [%s](%s)\n**작성자:** %s\n```\n%s\n```",
+							e.ObjectAttributes.Title, e.ObjectAttributes.URL, e.User.Name, truncate(string(out), 2000),
+						))
+					} else {
+						sendMM(mmDeploy, fmt.Sprintf(
+							"### 자동 배포 완료\n**MR 병합:** [%s](%s)\n**작성자:** %s",
+							e.ObjectAttributes.Title, e.ObjectAttributes.URL, e.User.Name,
+						))
+					}
+				}()
+			}
+		}
 
 	case "Issue Hook":
 		var e GitlabIssueEvent
@@ -238,7 +280,7 @@ func handleGitlab(w http.ResponseWriter, r *http.Request) {
 		}
 
 		msg := fmt.Sprintf(
-			"### 🐛 GitLab 이슈 오픈\n**프로젝트:** %s\n**제목:** [%s](%s)\n**작성자:** %s",
+			"### GitLab 이슈 오픈\n**프로젝트:** %s\n**제목:** [%s](%s)\n**작성자:** %s",
 			shortRepo(e.Project.Name, e.Project.WebURL),
 			e.ObjectAttributes.Title, e.ObjectAttributes.URL,
 			e.User.Name,
@@ -261,9 +303,9 @@ func handleGitlab(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[Gitlab] Pipeline Hook 처리 중: %s (%s)", e.Project.Name, status)
 
 		labels := map[string]string{
-			"success":  "✅ 성공",
-			"failed":   "❌ 실패",
-			"canceled": "⏹ 취소",
+			"success":  "성공",
+			"failed":   "실패",
+			"canceled": "취소",
 		}
 		label := labels[status]
 		if label == "" {
@@ -271,7 +313,7 @@ func handleGitlab(w http.ResponseWriter, r *http.Request) {
 		}
 
 		msg := fmt.Sprintf(
-			"### 🚀 GitLab Pipeline %s\n**프로젝트:** %s | **브랜치:** `%s`\n**커밋:** %s\n**작성자:** %s",
+			"### GitLab Pipeline %s\n**프로젝트:** %s | **브랜치:** `%s`\n**커밋:** %s\n**작성자:** %s",
 			label,
 			shortRepo(e.Project.Name, e.Project.WebURL),
 			e.ObjectAttributes.Ref,
@@ -279,6 +321,12 @@ func handleGitlab(w http.ResponseWriter, r *http.Request) {
 			e.User.Name,
 		)
 		sendMM(mmDeploy, msg)
+		if status == "failed" {
+			go sendDMToUser(e.User.Username, fmt.Sprintf(
+				"파이프라인 실패 알림\n**프로젝트:** %s\n**브랜치:** `%s`\n**커밋:** %s",
+				e.Project.Name, e.ObjectAttributes.Ref, firstLine(e.Commit.Message),
+			))
+		}
 
 	case "Tag Push Hook":
 		var e GitlabTagEvent
@@ -289,7 +337,7 @@ func handleGitlab(w http.ResponseWriter, r *http.Request) {
 		tag := strings.TrimPrefix(e.Ref, "refs/tags/")
 		log.Printf("[Gitlab] Tag Hook 처리 중: %s (%s)", e.Project.Name, tag)
 		msg := fmt.Sprintf(
-			"### 🏷 GitLab 태그 생성\n**프로젝트:** %s | **태그:** `%s` | **작성자:** %s",
+			"### GitLab 태그 생성\n**프로젝트:** %s | **태그:** `%s` | **작성자:** %s",
 			shortRepo(e.Project.Name, e.Project.WebURL),
 			tag, e.UserName,
 		)

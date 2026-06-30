@@ -29,6 +29,8 @@ func main() {
 		log.Println("[Main] .env 파일을 찾을 수 없습니다. (환경변수가 이미 설정되어 있다고 가정합니다)")
 	}
 
+	loadDeployHistory()
+
 	mux := http.NewServeMux()
 
 	// ... 핸들러 등록 생략 ...
@@ -39,6 +41,8 @@ func main() {
 	mux.HandleFunc("/slash", handleSlash)
 	mux.HandleFunc("/bot-action", handleBotAction)
 	mux.HandleFunc("/health", handleHealth)
+	mux.HandleFunc("/weather", handleWeatherPage)
+	mux.HandleFunc("/weather/api", handleWeatherAPI)
 
 	// 모든 요청을 기록하는 미들웨어
 	loggingMux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -50,6 +54,13 @@ func main() {
 	go startBot()
 	go startHealthCheck()
 	go startScheduler()
+	go startWeatherScheduler()
+	go startDockerMonitor()
+	go startMemoryMonitor()
+	go startSSLChecker()
+	go startHTTPHealthCheck()
+	go startDBBackup()
+	go startMRReminderScheduler()
 
 	log.Println("🚀 mm-bot 서버 시작 :9000")
 	log.Fatal(http.ListenAndServe(":9000", loggingMux))
